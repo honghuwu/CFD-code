@@ -409,10 +409,12 @@ class Env2DAirfoil:
             self.evolve(Q1, Q2, Q3,plot_p_field,show_observation_points,plot_fre)
 
     def plot_p_field(self, show_observation_points=0, save_path=None):
-        plt.clf()
+        # Create a new figure explicitly
+        fig = plt.figure(figsize=(10, 4))
+        
         self.p_array = self.p_.compute_vertex_values(self.mesh)
         self.p_array = self.p_array.reshape((self.mesh.num_vertices(),))
-        plt.figure(figsize=(10, 4))
+        
         plt.tripcolor(self.mesh.coordinates()[:, 0], self.mesh.coordinates()[:, 1], self.mesh.cells(), self.p_array,
                       shading="gouraud", cmap='coolwarm')
         plt.colorbar()
@@ -431,19 +433,20 @@ class Env2DAirfoil:
         plt.title('Pressure Field')
         if save_path:
             plt.savefig(save_path)
-            plt.close()
+            plt.close(fig) # Close the specific figure
         else:
             plt.show()
 
     def plot_u_field(self, show_observation_points=0, save_path=None):
-        plt.clf()
+        # Create a new figure explicitly
+        fig = plt.figure(figsize=(10, 4))
+        
         # Compute velocity magnitude
         ux, uy = self.u_.split(deepcopy=True)
         ux_array = ux.compute_vertex_values(self.mesh)
         uy_array = uy.compute_vertex_values(self.mesh)
         u_magnitude = np.sqrt(ux_array**2 + uy_array**2)
         
-        plt.figure(figsize=(10, 4))
         plt.tripcolor(self.mesh.coordinates()[:, 0], self.mesh.coordinates()[:, 1], self.mesh.cells(), u_magnitude,
                       shading="gouraud", cmap='coolwarm')
         plt.colorbar()
@@ -457,8 +460,9 @@ class Env2DAirfoil:
         grid_x, grid_y = np.meshgrid(np.linspace(x_min, x_max, nx), np.linspace(y_min, y_max, ny))
         
         points = self.mesh.coordinates()
-        grid_ux = griddata(points, ux_array, (grid_x, grid_y), method='linear')
-        grid_uy = griddata(points, uy_array, (grid_x, grid_y), method='linear')
+        # Use fill_value=0 to handle points outside the mesh
+        grid_ux = griddata(points, ux_array, (grid_x, grid_y), method='linear', fill_value=0)
+        grid_uy = griddata(points, uy_array, (grid_x, grid_y), method='linear', fill_value=0)
         
         # Plot arrows (black color)
         plt.quiver(grid_x, grid_y, grid_ux, grid_uy, color='k', scale=20, width=0.002)
@@ -473,20 +477,20 @@ class Env2DAirfoil:
         plt.title('Velocity Field')
         if save_path:
             plt.savefig(save_path)
-            plt.close()
+            plt.close(fig) # Close the specific figure
         else:
             plt.show()
 
     def plot_w_field(self, show_observation_points=0, save_path=None):
-        plt.clf()
+        # Create a new figure explicitly
+        fig = plt.figure(figsize=(10, 4))
         
         # Need to compute vorticity first
         self.w_ = self.compute_vorticity(self.u_)
         
         self.w_array = self.w_.compute_vertex_values(self.mesh)
         self.w_array = self.w_array.reshape((self.mesh.num_vertices(),))
-        # Use consistent figsize
-        plt.figure(figsize=(10, 4))
+        
         plt.tripcolor(self.mesh.coordinates()[:,0],self.mesh.coordinates()[:,1],self.mesh.cells(),self.w_array,shading="gouraud",cmap='coolwarm')
         plt.colorbar()
         
@@ -504,7 +508,7 @@ class Env2DAirfoil:
         plt.title('Vorticity Field')
         if save_path:
             plt.savefig(save_path)
-            plt.close()
+            plt.close(fig) # Close the specific figure
         else:
             plt.show()
 
@@ -519,11 +523,11 @@ class Env2DAirfoil:
         return VORTICITY
 
     def plot_mesh_save(self, save_path):
-        plt.figure(figsize=(16, 6), dpi=150)
+        fig = plt.figure(figsize=(16, 6), dpi=150)
         plot(self.mesh)
         plt.title('Mesh')
         plt.savefig(save_path)
-        plt.close()
+        plt.close(fig)
 
     def update_plot_p_field(self):
         self.evolve()
@@ -605,7 +609,7 @@ class Env2DAirfoil:
         plt.plot(x, Cd_list)
         
     def plot_full_Cd_curve(self, save_path):
-        plt.figure(figsize=(10, 6))
+        fig = plt.figure(figsize=(10, 6))
         plt.plot(np.arange(len(self.full_drag_list)) * self.dt, self.full_drag_list, label='Cd')
         avg_cd = np.mean(self.full_drag_list)
         plt.axhline(y=avg_cd, color='r', linestyle='--', label=f'Average Cd: {avg_cd:.4f}')
@@ -615,7 +619,7 @@ class Env2DAirfoil:
         plt.legend()
         plt.grid(True)
         plt.savefig(save_path)
-        plt.close()
+        plt.close(fig)
 
 def run_visualization_task(total_steps=50000, save_interval=500):
     # Define paths
