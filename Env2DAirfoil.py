@@ -3,8 +3,10 @@ from fenics import *
 from mshr import *
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
+from scipy.interpolate import griddata
 from math import *
-
+import os
+import cv2
 
 class Env2DAirfoil:
     def naca0012(self, x, chord=self.D):
@@ -80,6 +82,9 @@ class Env2DAirfoil:
 
         self.drag_mem = [0] * self.avg_drag_len
         self.lift_mem = [0] * self.avg_lift_len
+        
+        # New list to store full history for plotting
+        self.full_drag_list = []
 
         # Create airfoil
         self.x_coords = np.linspace(0, self.chord, self.num_points)
@@ -378,6 +383,9 @@ class Env2DAirfoil:
         self.lift_list.pop(0)
         self.lift_list.append(self.lift_coefficient)
         self.avg_lift = np.mean(self.lift_list)
+        
+        # Record full history
+        self.full_drag_list.append(self.drag_coefficient)
 
         if plot_p_field == 1 and self.n % plot_fre ==0:
             self.plot_p_field(show_observation_points)
@@ -400,8 +408,7 @@ class Env2DAirfoil:
         for i in range(n):
             self.evolve(Q1, Q2, Q3,plot_p_field,show_observation_points,plot_fre)
 
-    def plot_p_field(self,show_observation_points=0):
-               
+    def plot_p_field(self, show_observation_points=0, save_path=None):
         plt.clf()
         self.p_array = self.p_.compute_vertex_values(self.mesh)
         self.p_array = self.p_array.reshape((self.mesh.num_vertices(),))
@@ -421,15 +428,65 @@ class Env2DAirfoil:
              
         plt.xlabel('x')
         plt.ylabel('y')
-        plt.title('P_field')
-        plt.show()
+        plt.title('Pressure Field')
+        if save_path:
+            plt.savefig(save_path)
+            plt.close()
+        else:
+            plt.show()
 
-    def plot_w_field(self,show_observation_points=0):
-        
+    def plot_u_field(self, show_observation_points=0, save_path=None):
         plt.clf()
+        # Compute velocity magnitude
+        ux, uy = self.u_.split(deepcopy=True)
+        ux_array = ux.compute_vertex_values(self.mesh)
+        uy_array = uy.compute_vertex_values(self.mesh)
+        u_magnitude = np.sqrt(ux_array**2 + uy_array**2)
+        
+        plt.figure(figsize=(10, 4))
+        plt.tripcolor(self.mesh.coordinates()[:, 0], self.mesh.coordinates()[:, 1], self.mesh.cells(), u_magnitude,
+                      shading="gouraud", cmap='coolwarm')
+        plt.colorbar()
+        
+        # Add quiver (arrows) using interpolation to a regular grid
+        x_min, x_max = self.mesh.coordinates()[:, 0].min(), self.mesh.coordinates()[:, 0].max()
+        y_min, y_max = self.mesh.coordinates()[:, 1].min(), self.mesh.coordinates()[:, 1].max()
+        
+        # Grid density for arrows
+        nx, ny = 40, 20 
+        grid_x, grid_y = np.meshgrid(np.linspace(x_min, x_max, nx), np.linspace(y_min, y_max, ny))
+        
+        points = self.mesh.coordinates()
+        grid_ux = griddata(points, ux_array, (grid_x, grid_y), method='linear')
+        grid_uy = griddata(points, uy_array, (grid_x, grid_y), method='linear')
+        
+        # Plot arrows (black color)
+        plt.quiver(grid_x, grid_y, grid_ux, grid_uy, color='k', scale=20, width=0.002)
+
+        if show_observation_points == 1:
+            x_coords = np.array(self.locations)[:, 0]
+            y_coords = np.array(self.locations)[:, 1]
+            plt.scatter(x_coords, y_coords, color='black', s=5)
+             
+        plt.xlabel('x')
+        plt.ylabel('y')
+        plt.title('Velocity Field')
+        if save_path:
+            plt.savefig(save_path)
+            plt.close()
+        else:
+            plt.show()
+
+    def plot_w_field(self, show_observation_points=0, save_path=None):
+        plt.clf()
+        
+        # Need to compute vorticity first
+        self.w_ = self.compute_vorticity(self.u_)
+        
         self.w_array = self.w_.compute_vertex_values(self.mesh)
         self.w_array = self.w_array.reshape((self.mesh.num_vertices(),))
-        plt.figure(figsize=(100,40))
+        # Use consistent figsize
+        plt.figure(figsize=(10, 4))
         plt.tripcolor(self.mesh.coordinates()[:,0],self.mesh.coordinates()[:,1],self.mesh.cells(),self.w_array,shading="gouraud",cmap='coolwarm')
         plt.colorbar()
         
@@ -444,37 +501,29 @@ class Env2DAirfoil:
         
         plt.xlabel('x')
         plt.ylabel('y')
-        plt.title('Vorticity_field')
-        plt.show()
+        plt.title('Vorticity Field')
+        if save_path:
+            plt.savefig(save_path)
+            plt.close()
+        else:
+            plt.show()
 
     def compute_vorticity(self,u):
         mesh = self.mesh
-        class VorticityExpression(UserExpression):
-            def __init__(self,ux_value,uy_value,degree=1,mesh=mesh):
-                self.ux_value = ux_value
-                self.uy_value = uy_value
-                self.YY = FunctionSpace(mesh,'P',1)
-                self.ux_trial = Function(self.YY)
-                self.ux_trial.vector().set_local(self.ux_value)
-                self.uy_test = Function(self.YY)
-                self.uy_test.vector().set_local(self.uy_value)
-                super().__init__(degree=degree)
-            def eval(self,value,x):
-                value[0] = self.ux_trial.dx(1)(x)-self.uy_test.dx(0)(x)
-                
-            def value_shape(self):
-                return ()
+        # class VorticityExpression(UserExpression): ... (This part in original was unused inside the function, 
+        # relying on project(uy.dx(0)-ux.dx(1),self.W) instead)
         
         ux,uy = u.split(deepcopy = True)
-        VORTICITY = Function(self.W)
+        # VORTICITY = Function(self.W)
         VORTICITY = project(uy.dx(0)-ux.dx(1),self.W)
         return VORTICITY
 
-       
-            
-        # plt.savefig("Airfoil_Re2500/" + str(self.n / self.num_steps).zfill(6) + "Re2500" + ".png")
-        if self.n % 200 == 0:
-            plt.show()
+    def plot_mesh_save(self, save_path):
+        plt.figure(figsize=(16, 6), dpi=150)
+        plot(self.mesh)
+        plt.title('Mesh')
+        plt.savefig(save_path)
+        plt.close()
 
     def update_plot_p_field(self):
         self.evolve()
@@ -552,13 +601,97 @@ class Env2DAirfoil:
             self.n += 1
 
     def plot_Cd_curve(self, Cd_list):
-
         x = range(len(Cd_list))
         plt.plot(x, Cd_list)
+        
+    def plot_full_Cd_curve(self, save_path):
+        plt.figure(figsize=(10, 6))
+        plt.plot(np.arange(len(self.full_drag_list)) * self.dt, self.full_drag_list, label='Cd')
+        avg_cd = np.mean(self.full_drag_list)
+        plt.axhline(y=avg_cd, color='r', linestyle='--', label=f'Average Cd: {avg_cd:.4f}')
+        plt.xlabel('Time (s)')
+        plt.ylabel('Drag Coefficient')
+        plt.title('Cd Curve (0-5s)')
+        plt.legend()
+        plt.grid(True)
+        plt.savefig(save_path)
+        plt.close()
 
+def run_visualization_task(total_steps=50000, save_interval=500):
+    # Define paths
+    base_path = os.getcwd()
+    result_path = os.path.join(base_path, 'result')
+    pic_path = os.path.join(result_path, 'pic')
+    video_path = os.path.join(result_path, 'video')
+    
+    # Create directories
+    os.makedirs(pic_path, exist_ok=True)
+    os.makedirs(video_path, exist_ok=True)
+    
+    # Initialize Environment
+    print("Initializing Environment...")
+    env = Env2DAirfoil(save_data=0) # Disable XDMF save to save disk space if not needed
+    
+    # Save Mesh
+    print("Saving Mesh...")
+    env.plot_mesh_save(os.path.join(pic_path, 'cfd_mesh.png'))
+    
+    # Simulation settings
+    # 5 seconds -> 50,000 steps (dt=0.0001)
+    # Save every 0.05s -> every 500 steps
+    
+    print(f"Starting simulation for {total_steps} steps...")
+    
+    for step in range(1, total_steps + 1):
+        env.evolve(0)
+        
+        if step % save_interval == 0:
+            time_s = step * env.dt
+            print(f"Step {step}/{total_steps} (Time: {time_s:.2f}s) - Saving frames...")
+            
+            # Save Pressure Field
+            env.plot_p_field(save_path=os.path.join(pic_path, f'p_field_{time_s:.2f}s.png'))
+            
+            # Save Velocity Field
+            env.plot_u_field(save_path=os.path.join(pic_path, f'u_field_{time_s:.2f}s.png'))
+            
+            # Save Vorticity Field
+            env.plot_w_field(save_path=os.path.join(pic_path, f'w_field_{time_s:.2f}s.png'))
+            
+    # Save Cd Curve
+    print("Saving Cd Curve...")
+    env.plot_full_Cd_curve(os.path.join(pic_path, 'Cd_curve_5s.png'))
+    
+    # Generate Videos
+    print("Generating Videos...")
+    
+    def make_video(image_prefix, output_name, fps=20): 
+        images = [img for img in os.listdir(pic_path) if img.startswith(image_prefix) and img.endswith(".png")]
+        # Sort by time stamp
+        images.sort(key=lambda x: float(x.split('_')[-1].replace('s.png', '')))
+        
+        if not images:
+            print(f"No images found for {image_prefix}")
+            return
 
-env = Env2DAirfoil()
-for i in range(env.num_steps):
-    env.evolve(0)
-# env.plot_p_field()
+        frame = cv2.imread(os.path.join(pic_path, images[0]))
+        height, width, layers = frame.shape
+        
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        video = cv2.VideoWriter(os.path.join(video_path, output_name), fourcc, fps, (width, height))
+        
+        for image in images:
+            video.write(cv2.imread(os.path.join(pic_path, image)))
+            
+        cv2.destroyAllWindows()
+        video.release()
+        print(f"Saved {output_name}")
 
+    make_video('p_field', 'pressure_field_5s.mp4', fps=20)
+    make_video('u_field', 'velocity_field_5s.mp4', fps=20)
+    make_video('w_field', 'vorticity_field_5s.mp4', fps=20)
+    
+    print("All tasks completed successfully!")
+
+if __name__ == "__main__":
+    run_visualization_task()
