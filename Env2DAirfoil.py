@@ -9,10 +9,10 @@ import os
 import cv2
 
 class Env2DAirfoil:
-    def naca0012(self, x, chord=1.0):
+    def naca0012(self, x, chord=self.D):
         return 0.6 * (-0.1015 * x ** 4 + 0.2843 * x ** 3 - 0.3576 * x ** 2 - 0.1221 * x + 0.2969 * np.sqrt(x))
 
-    def naca0015(self, x, chord=1.0):
+    def naca0015(self, x, chord=sefl.D):
         return 0.6 * (-0.0644 * x ** 4 + 0.2726 * x ** 3 - 0.3576 * x ** 2 - 0.1270 * x + 0.2983 * np.sqrt(x))
 
     def __init__(self, Re=2500, attack_angle=pi / 7.2, probes_mode=0, probe_locations_mode=0, save_data=1,
@@ -519,7 +519,7 @@ class Env2DAirfoil:
         return VORTICITY
 
     def plot_mesh_save(self, save_path):
-        plt.figure(figsize=(160, 60), dpi=150)
+        plt.figure(figsize=(16, 6), dpi=150)
         plot(self.mesh)
         plt.title('Mesh')
         plt.savefig(save_path)
@@ -617,7 +617,7 @@ class Env2DAirfoil:
         plt.savefig(save_path)
         plt.close()
 
-def run_visualization_task(total_steps=50000, save_interval=500,video_fps = 20):
+def run_visualization_task(total_steps=50000, save_interval=500):
     # Define paths
     base_path = os.getcwd()
     result_path = os.path.join(base_path, 'result')
@@ -632,10 +632,10 @@ def run_visualization_task(total_steps=50000, save_interval=500,video_fps = 20):
     print("Initializing Environment...")
     env = Env2DAirfoil(save_data=0) # Disable XDMF save to save disk space if not needed
     
-    # # Save Mesh
-    # print("Saving Mesh...")
-    # env.plot_mesh_save(os.path.join(pic_path, 'cfd_mesh.png'))
-    #
+    # Save Mesh
+    print("Saving Mesh...")
+    env.plot_mesh_save(os.path.join(pic_path, 'cfd_mesh.png'))
+    
     # Simulation settings
     # 5 seconds -> 50,000 steps (dt=0.0001)
     # Save every 0.05s -> every 500 steps
@@ -665,7 +665,7 @@ def run_visualization_task(total_steps=50000, save_interval=500,video_fps = 20):
     # Generate Videos
     print("Generating Videos...")
     
-    def make_video(image_prefix, output_name, fps=20):
+    def make_video(image_prefix, output_name, fps=20): 
         images = [img for img in os.listdir(pic_path) if img.startswith(image_prefix) and img.endswith(".png")]
         # Sort by time stamp
         images.sort(key=lambda x: float(x.split('_')[-1].replace('s.png', '')))
@@ -687,29 +687,11 @@ def run_visualization_task(total_steps=50000, save_interval=500,video_fps = 20):
         video.release()
         print(f"Saved {output_name}")
 
-    make_video('p_field', 'pressure_field_5s.mp4', fps=video_fps)
-    make_video('u_field', 'velocity_field_5s.mp4', fps=video_fps)
-    make_video('w_field', 'vorticity_field_5s.mp4', fps=video_fps)
+    make_video('p_field', 'pressure_field_5s.mp4', fps=20)
+    make_video('u_field', 'velocity_field_5s.mp4', fps=20)
+    make_video('w_field', 'vorticity_field_5s.mp4', fps=20)
     
     print("All tasks completed successfully!")
 
 if __name__ == "__main__":
-    # run_visualization_task()
-    base_path = os.getcwd()
-    result_path = os.path.join(base_path, 'result')
-    pic_path = os.path.join(result_path, 'pic')
-    video_path = os.path.join(result_path, 'video')
-
-    # Create directories
-    os.makedirs(pic_path, exist_ok=True)
-    os.makedirs(video_path, exist_ok=True)
-
-    # Initialize Environment
-    print("Initializing Environment...")
-    env = Env2DAirfoil(save_data=0)  # Disable XDMF save to save disk space if not needed
-
-    # Save Mesh
-    print("Saving Mesh...")
-    env.plot_mesh()
-    env.plot_mesh_save(os.path.join(pic_path, 'cfd_mesh.png'))
-
+    run_visualization_task()
