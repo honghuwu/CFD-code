@@ -1,71 +1,81 @@
+import numpy as np
 from fenics import *
 from mshr import *
-import numpy as np
 import matplotlib.pyplot as plt
-import meshio
-from math import sin, cos, pi
 from matplotlib.animation import FuncAnimation
+from math import *
 from scipy.interpolate import griddata
 import os
 import cv2
 
 
-# import gym.spaces
+class Env2DAirfoil:
+    def naca0012(self, x, chord=1.0):
+        return 0.6 * (-0.1015 * x ** 4 + 0.2843 * x ** 3 - 0.3576 * x ** 2 - 0.1221 * x + 0.2969 * np.sqrt(x))
 
+    def naca0015(self, x, chord=1.0):
+        return 0.6 * (-0.0644 * x ** 4 + 0.2726 * x ** 3 - 0.3576 * x ** 2 - 0.1270 * x + 0.2983 * np.sqrt(x))
 
-class Env2DCylinder():
-    def epsilon(self, u):
-        return sym(nabla_grad(u))
+    def __init__(self, Re=2500, attack_angle=pi / 7.2, probes_mode=0, probe_locations_mode=0, save_data=1,
+                 save_fre=400):
 
-    def sigma(self, u, p):
-        return 2 * self.mu * self.epsilon(u) - p * Identity(len(u))
+        self.xdmffile_u = XDMFFile('Airfoil_Re2500/velocity.xdmf')
+        self.xdmffile_p = XDMFFile('Airfoil_Re2500/pressure.xdmf')
 
-    def __init__(self, save_data=1):
-        self.save_data = save_data
-        # Files for storing the data
-        self.xdmffile_u = XDMFFile('navier_stokes_cylinder/velocity.xdmf')
-        self.xdmffile_p = XDMFFile('navier_stokes_cylinder/pressure.xdmf')
+        self.timeseries_u = TimeSeries('Airfoil_Re2500/velocity_series')
+        self.timeseries_p = TimeSeries('Airfoil_Re2500/pressure_series')
 
-        self.timeseries_u = TimeSeries('navier_stokes_cylinder/velocity_series')
-        self.timeseries_p = TimeSeries('navier_stokes_cylinder/pressure_series')
+        self.mesh_for_airfoil = File('Airfoil_Re2500/cylinder.xml.gz')
 
-        self.mesh_for_cylinder = File('navier_stokes_cylinder/cylinder.xml.gz')
-
-        self.T = 1
-        self.num_steps = 1010
+        self.mesh_index = 200
+        self.T = 10
+        self.num_steps = 100000
         self.dt = self.T / self.num_steps
-        self.D = 0.1
-        self.Re = 100
-        self.U_m = 1.5
-        self.mu = 2 * (self.U_m) * (self.D) / (3 * (self.Re))
+        self.D = 1.0
+        self.Re = Re
+        self.U_m = 0.45
+        self.mu = 2 * self.U_m * self.D / (3 * self.Re)
         self.rho = 1
         self.Q0 = 0
-
-        self.Qmax = 100
-
-        # self.action_space = gym.spaces.Box(low=-self.Qmax,high=self.Qmax,shape=(1,),dtype=np.float32)
-
+        self.Q_total_n = 0  # the total mass flow rate of all the jets at time step n, calculated by self.update_jetBCs
+        self.chord = self.D
+        self.attack_angle = attack_angle
+        self.num_points = 100
+        self.n_outer_iterations = 3
         self.t = 0
         self.n = 0
+        self.probes_mode = probes_mode
+        self.probe_locations_mode = probe_locations_mode
+        self.length = 16  # the number of observation points in the x direction
+        self.width = 12  # the number of observation points in the y direction
+        self.save_data = save_data  # if 1, save the data; if 0, do not save
+        self.save_fre = save_fre  # the frequency of saving data, in terms of time steps.
+
+        self.locations = []  # locations of the observation points
+        self.jet_locations = []  # exact locations of the jets
+        self.probes = []
+        self.recall_step = 40
+        self.probes_num = 192
+        self.state_matrix = np.zeros((self.recall_step, self.probes_num * 3))
+
+        self.jet1_location = 0.2
+        self.jet2_location = 0.4
+        self.jet3_location = 0.6
+        self.jet_width_rate = 0.01  # Real width of jet = 2*self.jet_width_rate*self.chord
+
+        self.jet_locations.append(Point((self.jet1_location, self.naca0012(self.jet1_location))))
+        self.jet_locations.append(Point((self.jet2_location, self.naca0012(self.jet2_location))))
+        self.jet_locations.append(Point((self.jet3_location, self.naca0012(self.jet3_location))))
+
         self.Cd_max = 0
         self.Cl_max = 0
-        self.x = []
-        self.y = []
-        self.z = []
-
-        D = self.D
-
-        self.drag_coefficient, self.lift_coefficient = 0, 0
-        self.avg_drag, self.avg_lift = 0, 0
-
-        self.probes = []
-
-        self.locations = []
-        self.l1 = 0.55 * D
-        self.l2 = 0.8 * D
+        self.x = range(50, self.num_steps, 50)
+        self.y = np.ones(int(self.num_steps / 50))
+        self.z = np.ones(int(self.num_steps / 50))
 
         self.mem_episode = 1000
         self.mem_state = []
+
         self.avg_drag_len = 25
         self.drag_list = [0] * self.avg_drag_len
         self.avg_lift_len = 25
@@ -73,88 +83,133 @@ class Env2DCylinder():
 
         self.drag_mem = [0] * self.avg_drag_len
         self.lift_mem = [0] * self.avg_lift_len
-
         self.full_drag_list = []
-        self.jet_locations = [
-            (2 * self.D + 0.5 * self.D * cos(0.5 * pi), 2 * self.D + 0.5 * self.D * sin(0.5 * pi)),
-            (2 * self.D + 0.5 * self.D * cos(1.5 * pi), 2 * self.D + 0.5 * self.D * sin(1.5 * pi))
-        ]
 
-        for theta in np.linspace(0, 2 * pi, 13):
-            self.locations.append((2 * D + self.l1 * sin(theta), 2 * D + self.l1 * cos(theta)))
+        # Create airfoil
+        self.x_coords = np.linspace(0, self.chord, self.num_points)
+        self.airfoil_points = [Point(x, self.naca0012(x, self.chord)) for x in self.x_coords]
+        self.airfoil_points = sorted(self.airfoil_points, key=lambda p: atan2(p.y(), p.x() - 0.05))
+        lower_points = [Point(p.x(), -p.y()) for p in self.airfoil_points]
+        self.airfoil_points += lower_points
+        self.airfoil_points = sorted(self.airfoil_points, key=lambda p: atan2(p.y(), p.x() - 0.05))
 
-        for theta in np.linspace(0, 2 * pi, 13):
-            self.locations.append((2 * D + self.l2 * sin(theta), 2 * D + self.l2 * cos(theta)))
+        # Rotate the airfoil according to the self.attack_angle
+        rotation_matrix = np.array(
+            [[cos(-self.attack_angle), -sin(-self.attack_angle)], [sin(-self.attack_angle), cos(-self.attack_angle)]])
+        rotated_airfoil = [Point(np.dot(rotation_matrix, (p.x(), p.y()))) for p in self.airfoil_points]
+        self.jet_locations = [Point(np.dot(rotation_matrix, (p.x(), p.y()))) for p in self.jet_locations]
+        self.jet_locations = [(p.x(), p.y()) for p in self.jet_locations]
+        self.airfoil0012 = Polygon(rotated_airfoil)
+        self.channel = Rectangle(Point(-0.5 * self.D, -0.7 * self.D), Point(3 * self.D, 0.7 * self.D))
+        self.domain = self.channel - self.airfoil0012
+        mesh = generate_mesh(self.domain, self.mesh_index)
 
-        for x in np.linspace(2.5 * D, 5 * D, 5):
-            for y in np.linspace(1.2 * D, 2.8 * D, 4):
-                self.locations.append((x, y))
-
-        self.probes_num = len(self.locations)
-
-        # Read the mesh
-        # self.mesh = Mesh('navier_stokes_cylinder/cylinder.xml.gz')
-
-        # Create mesh
-        channel = Rectangle(Point(0, 0), Point(22 * D, 4.1 * D))
-        cylinder = Circle(Point(2 * D, 2 * D), 0.5 * D)
-        domain = channel - cylinder
-        self.mesh = generate_mesh(domain, 120)
-
-        # Refine the mesh near the cylinder
-        cell_markers = MeshFunction("bool", self.mesh, self.mesh.topology().dim())
+        # Refine the mesh
+        cell_markers = MeshFunction("bool", mesh, mesh.topology().dim())
         cell_markers.set_all(False)
-        origin = Point(2 * D, 2 * D)
-        for cell in cells(self.mesh):
+        origin = Point(2 * self.D, 2 * self.D)
+        for cell in cells(mesh):
             p = cell.midpoint()
-            if p.distance(origin) < 0.09:
-                cell_markers[cell] = True
-        self.mesh = refine(self.mesh, cell_markers, redistribute=True)
-
-        # Store the mesh
-        self.mesh_for_cylinder << self.mesh
+            for q in rotated_airfoil:
+                if p.distance(q) < 0.08:
+                    cell_markers[cell] = True
+        mesh = refine(mesh, cell_markers, redistribute=True)
+        self.mesh = mesh
+        self.mesh_for_airfoil << self.mesh
 
         self.V = VectorFunctionSpace(self.mesh, 'P', 2)
         self.Q = FunctionSpace(self.mesh, 'P', 1)
         self.W = FunctionSpace(self.mesh, 'CG', 1)
 
-        self.V_test = VectorFunctionSpace(self.mesh, 'P', 2)
-        self.Q_test = FunctionSpace(self.mesh, 'P', 1)
-
         # Define boundaries
-        inflow = 'near(x[0],0)'
-        outflow = 'near(x[0],2.2)'
-        walls = 'near(x[1],0)||near(x[1],0.41)'
-        cylinder = 'on_boundary && x[0]>0.1 && x[0]<0.3 && x[1] >0.1 && x[1] <0.3'
-        self.jet_top = 'on_boundary && x[0]>(0.2-0.05*sin(5*pi/180)) && x[0]<(0.2+0.05*sin(5*pi/180)) && x[1]>0.2 && x[1]<0.3'
-        self.jet_bottom = 'on_boundary && x[0]>(0.2-0.05*sin(5*pi/180)) && x[0]<(0.2+0.05*sin(5*pi/180)) && x[1]<0.2 && x[1]>0.1'
+        self.inflow = 'near(x[0],-0.5)'
+        self.outflow = 'near(x[0],3)'
+        self.walls = 'near(x[1],-0.7)||near(x[1],0.7)'
+        self.airfoil = 'on_boundary && x[0]>-0.1 && x[0]<1.1 && x[1] >-0.6&& x[1] <0.3'
+
+        # self.jet1 = 'on_boundary && x[0]>({0}*{1}) && x[0]<({0}*{1}+0.03*{1}) && x[1]>0 && x[1]<(0.5*{1})'.format(self.jet1_location,self.D)
+        self.jet1 = 'on_boundary && x[0]>({0}*{1}-{2}*{1}) && x[0]<({0}*{1}+{2}*{1}) '.format(self.jet1_location,
+                                                                                              self.D * cos(
+                                                                                                  self.attack_angle),
+                                                                                              self.jet_width_rate * cos(
+                                                                                                  self.attack_angle))
+        self.jet2 = 'on_boundary && x[0]>({0}*{1}-{2}*{1}) && x[0]<({0}*{1}+{2}*{1}) '.format(self.jet2_location,
+                                                                                              self.D * cos(
+                                                                                                  self.attack_angle),
+                                                                                              self.jet_width_rate * cos(
+                                                                                                  self.attack_angle))
+        self.jet3 = 'on_boundary && x[0]>({0}*{1}-{2}*{1}) && x[0]<({0}*{1}+{2}*{1}) '.format(self.jet3_location,
+                                                                                              self.D * cos(
+                                                                                                  self.attack_angle),
+                                                                                              self.jet_width_rate * cos(
+                                                                                                  self.attack_angle))
 
         # Inflow profile
-        inflow_profile = ('4.0*(U_m)*x[1]*(0.41-x[1])/pow(0.41,2)', '0')
-        inflow_f = Expression(inflow_profile, U_m=Constant(1.5), degree=2)
+        self.inflow_profile = ('4.0*(U_m)*(0.7*D+x[1])*(0.7*D-x[1])/pow(1.4,2)', '0')
+        # inflow_profile = ('1.0','0')
+        self.inflow_f = Expression(self.inflow_profile, U_m=Constant(0.45), D=Constant(1), degree=2)
 
         # Jet profile. Jet1 is at the top of the cylinder, and Jet2 is at the bottom of the cylinder.
-        self.jet1_f = Expression(
-            ('cos(atan2(x[1],x[0]))*cos(pi*(atan2(x[1],x[0])-theta0_1)/width)*Qjet*pi/(2*width*pow(radius,2))', \
-             'sin(atan2(x[1],x[0]))*cos(pi*(atan2(x[1],x[0])-theta0_1)/width)*Qjet*pi/(2*width*pow(radius,2))'), \
-            Qjet=0, width=Constant(10), radius=Constant(10), theta0_1=Constant(0.5 * pi), degree=2)
+        # "radius" here refers to the chord length of the airfoil.
 
-        self.jet2_f = Expression(
-            ('cos(atan2(x[1],x[0]))*cos(pi*(atan2(x[1],x[0])-theta0_2)/width)*(-Qjet)*pi/(2*width*pow(radius,2))', \
-             'sin(atan2(x[1],x[0]))*cos(pi*(atan2(x[1],x[0])-theta0_2)/width)*(-Qjet)*pi/(2*width*pow(radius,2))'), \
-            Qjet=0, width=Constant(10), radius=Constant(10), theta0_2=Constant(1.5 * pi), degree=2)
+        self.jet1_f = Expression((
+            'cos(atan2(-1,(0.6*(-0.406*pow(x[0]/cos(attack_angle),3)+0.8529*pow(x[0]/cos('
+            'attack_angle),2)-0.7152*x[0]/cos(attack_angle)-0.1221+0.14845*pow(x[0]/cos('
+            'attack_angle),-0.5))))-attack_angle)*cos((x[0]-x_center)/(width*cos('
+            'attack_angle)))*Qjet*pi/(2*width*pow(radius,2))', \
+            'sin(atan2(-1,(0.6*(-0.406*pow(x[0]/cos(attack_angle),3)+0.8529*pow(x[0]/cos('
+            'attack_angle),2)-0.7152*x[0]/cos(attack_angle)-0.1221+0.14845*pow(x[0]/cos('
+            'attack_angle),-0.5))))-attack_angle)*cos((x[0]-x_center)/(width*cos('
+            'attack_angle)))*Qjet*pi/(2*width*pow(radius,2))'), \
+            Qjet=0, width=0.01, attack_angle=0, x_center=0.2, radius=Constant(1), degree=2)
+
+        self.jet2_f = Expression((
+            'cos(atan2(-1,(0.6*(-0.406*pow(x[0]/cos(attack_angle),3)+0.8529*pow(x[0]/cos('
+            'attack_angle),2)-0.7152*x[0]/cos(attack_angle)-0.1221+0.14845*pow(x[0]/cos('
+            'attack_angle),-0.5))))-attack_angle)*cos((x[0]-x_center)/(width*cos('
+            'attack_angle)))*Qjet*pi/(2*width*pow(radius,2))', \
+            'sin(atan2(-1,(0.6*(-0.406*pow(x[0]/cos(attack_angle),3)+0.8529*pow(x[0]/cos('
+            'attack_angle),2)-0.7152*x[0]/cos(attack_angle)-0.1221+0.14845*pow(x[0]/cos('
+            'attack_angle),-0.5))))-attack_angle)*cos((x[0]-x_center)/(width*cos('
+            'attack_angle)))*Qjet*pi/(2*width*pow(radius,2))'), \
+            Qjet=0, width=0.01, attack_angle=0, x_center=0.4, radius=Constant(1), degree=2)
+
+        self.jet3_f = Expression((
+            'cos(atan2(-1,(0.6*(-0.406*pow(x[0]/cos(attack_angle),3)+0.8529*pow(x[0]/cos('
+            'attack_angle),2)-0.7152*x[0]/cos(attack_angle)-0.1221+0.14845*pow(x[0]/cos('
+            'attack_angle),-0.5))))-attack_angle)*cos((x[0]-x_center)/(width*cos('
+            'attack_angle)))*Qjet*pi/(2*width*pow(radius,2))', \
+            'sin(atan2(-1,(0.6*(-0.406*pow(x[0]/cos(attack_angle),3)+0.8529*pow(x[0]/cos('
+            'attack_angle),2)-0.7152*x[0]/cos(attack_angle)-0.1221+0.14845*pow(x[0]/cos('
+            'attack_angle),-0.5))))-attack_angle)*cos((x[0]-x_center)/(width*cos('
+            'attack_angle)))*Qjet*pi/(2*width*pow(radius,2))'), \
+            Qjet=0, width=0.01, attack_angle=0, x_center=0.6, radius=Constant(1), degree=2)
+
+        # Adjust the parameters in the Expressions for the jets according to the initial settings.
+        self.jet1_f.width = self.jet_width_rate
+        self.jet2_f.width = self.jet_width_rate
+        self.jet3_f.width = self.jet_width_rate
+
+        self.jet1_f.attack_angle = self.attack_angle
+        self.jet2_f.attack_angle = self.attack_angle
+        self.jet3_f.attack_angle = self.attack_angle
+
+        self.jet1_f.x_center = self.jet1_location
+        self.jet2_f.x_center = self.jet2_location
+        self.jet3_f.x_center = self.jet3_location
 
         # boundary conditions.
-        self.bcu_inflow = DirichletBC(self.V, inflow_f, inflow)
-        self.bcu_walls = DirichletBC(self.V, Constant((0, 0)), walls)
-        self.bcu_cylinder = DirichletBC(self.V, Constant((0, 0)), cylinder)
-        self.bcp_outflow = DirichletBC(self.Q, Constant(0), outflow)
+        self.bcu_inflow = DirichletBC(self.V, self.inflow_f, self.inflow)
+        self.bcu_walls = DirichletBC(self.V, Constant((0, 0)), self.walls)
+        self.bcu_airfoil = DirichletBC(self.V, Constant((0, 0)), self.airfoil)
+        self.bcp_outflow = DirichletBC(self.Q, Constant(0), self.outflow)
         self.bcp = [self.bcp_outflow]
-        self.bcu_jet_top = DirichletBC(self.V, self.jet1_f, self.jet_top)
-        self.bcu_jet_bottom = DirichletBC(self.V, self.jet2_f, self.jet_bottom)
-        self.bcu = [self.bcu_inflow, self.bcu_walls, self.bcu_cylinder, self.bcu_jet_top, self.bcu_jet_bottom]
+        self.bcu_jet1 = DirichletBC(self.V, self.jet1_f, self.jet1)
+        self.bcu_jet2 = DirichletBC(self.V, self.jet2_f, self.jet2)
+        self.bcu_jet3 = DirichletBC(self.V, self.jet3_f, self.jet3)
 
-        # Trial and Test functions
+        self.bcu = [self.bcu_inflow, self.bcu_walls, self.bcu_airfoil, self.bcu_jet1, self.bcu_jet2, self.bcu_jet3]
+
         self.u = TrialFunction(self.V)
         self.v = TestFunction(self.V)
         self.p = TrialFunction(self.Q)
@@ -167,13 +222,11 @@ class Env2DCylinder():
         self.p_ = Function(self.Q)
         self.w_ = Function(self.W)
 
-        self.u_mem = Function(self.V)
-        self.p_mem = Function(self.Q)
-
         # Expressions used in variational forms
         self.U = 0.5 * (self.u_n + self.u)
         n = -FacetNormal(self.mesh)
-        f = Constant((0, 0))
+        self.f = Constant((0, 0))
+        f = self.f
         k = Constant(self.dt)
         mu = Constant(self.mu)
 
@@ -203,19 +256,44 @@ class Env2DCylinder():
         [bc.apply(self.A1) for bc in self.bcu]
         [bc.apply(self.A2) for bc in self.bcp]
 
-        # self.memorize_state()
+        self.observation_locations()
 
-    def update_jetBCs(self, new_Qjet):
-        self.jet1_f.Qjet = new_Qjet
-        self.jet2_f.Qjet = new_Qjet
-        # BC expressions are updated automatically, no need to recreate DirichletBC objects
-        # or re-apply them to the matrix A1/A2 if the boundary geometry hasn't changed.
+    def observation_locations(self):
 
+        if self.probe_locations_mode == 0:
+            for x in np.linspace(self.D, 2.5 * self.D, self.length):
+                for y in np.linspace(0.4 * self.D, -0.4 * self.D, self.width):
+                    self.locations.append((x, y))
+                    # self.locations.append(x)
+                    # self.locations.append(y)
+
+        # update the boundary conditons related to the jets
+
+    def update_jetBCs(self, new_Qjet1, new_Qjet2, new_Qjet3):
+        self.jet1_f.Qjet = new_Qjet1
+        self.jet2_f.Qjet = new_Qjet2
+        self.jet3_f.Qjet = new_Qjet3
+        self.bcu_jet1 = DirichletBC(self.V, self.jet1_f, self.jet1)
+        self.bcu_jet2 = DirichletBC(self.V, self.jet2_f, self.jet2)
+        self.bcu_jet3 = DirichletBC(self.V, self.jet3_f, self.jet3)
+        self.bcu = [self.bcu_inflow, self.bcu_walls, self.bcu_airfoil, self.bcu_jet1, self.bcu_jet2, self.bcu_jet3]
+
+        # Apply bcs to matrices
+        [bc.apply(self.A1) for bc in self.bcu]
+        [bc.apply(self.A2) for bc in self.bcp]
+
+        return (new_Qjet1 + new_Qjet2 + new_Qjet3)
+
+    def epsilon(self, u):
+        return sym(nabla_grad(u))
+
+        # Stress tensor
+
+    def sigma(self, u, p):
+        return 2 * self.mu * self.epsilon(u) - p * Identity(len(u))
 
     def compute_drag_lift_coefficients(self, u, p):
         # Define normal vector along the cylinder surface
-        rho = self.rho
-        D = self.D
         n = FacetNormal(self.mesh)
         #     stress_tensor=sigma(u,p_n)
         stress_tensor = self.sigma(u, p)
@@ -226,7 +304,9 @@ class Env2DCylinder():
         class CylinderBoundary(SubDomain):
             def inside(self, x, on_boundary):
                 tol = 1E-14
-                return on_boundary and x[0] > 0.1 and x[0] < 0.3 and x[1] > 0.1 and x[1] < 0.3
+                self.D = 1  ### needs to be modified later on
+                return on_boundary and x[0] > -0.1 * self.D and x[0] < 1.6 * self.D and x[1] > -0.6 * self.D and x[
+                    1] < 0.3 * self.D
 
         Gamma_1 = CylinderBoundary()
         Gamma_1.mark(boundary_parts, 1)
@@ -237,28 +317,49 @@ class Env2DCylinder():
         drag_force = assemble(force[0] * ds)
         lift_force = assemble(force[1] * ds)
         # Compute drag and lift coefficients
-        drag_coefficient = abs(2 * drag_force / (rho * 1.0 * D))
-        lift_coefficient = abs(2 * lift_force / (rho * 1.0 * D))
+        drag_coefficient = abs(2 * drag_force / (self.rho * 1.0 * self.D))
+        lift_coefficient = abs(2 * lift_force / (self.rho * 1.0 * self.D))
 
         return drag_coefficient, lift_coefficient
 
-    def get_reward(self):
-        Cd, Cl = self.compute_drag_lift_coefficients(self, u, p)
-        return -Cd - 0.2 * Cl  # reward function ?
+        # progress=Progress('Time-stepping')
+        # set_log_level(PROGRESS)
 
-    def evolve(self, a, plot_p_field=0, show_observation_points=0, plot_fre=200):
-        t = self.t
-        n = self.n
-        x = self.x
-        y = self.y
-        z = self.z
-        dt = self.dt
+    def probes_vp(self):
+        self.probes = []
+        for p in self.locations:
+            self.probes.append(self.u_((p[0], p[1]))[0])
+            self.probes.append(self.u_((p[0], p[1]))[1])
+            self.probes.append(self.p_((p[0], p[1])))
 
-        self.t += dt
+        self.state_matrix = np.concatenate((self.state_matrix[1:], [self.probes]), axis=0)
+
+        # self.probes=evals
+        # self.nprobes=len(locations)
+
+        if self.probes_mode == 0:
+            self.probes_num = len(self.locations)
+            return self.probes
+        if self.probes_mode == 1:
+            return self.state_matrix
+
+    def get_reward(self, Cd, Cl, mode=0):  ############# more modes might be added later on
+        return -Cd - 0.2 * Cl + 5  # plus the average drag without control
+
+    def evolve(self, Q1=0, Q2=0, Q3=0, plot_p_field=0, show_observation_points=0, plot_fre=400):
+        # Time-stepping
+
+        if self.n % 200 == 0:
+            print("Temp num step:", self.n)
+
+        self.Q_total = self.update_jetBCs(Q1, Q2, Q3)
+
+        # for outer_iter in range(self.n_outer_iterations):
+
+        self.t += self.dt
         self.n += 1
-
         # update the BCs with a Qjet number
-        self.update_jetBCs(a)
+        # update_jetBCs(3000
 
         # 1 Tentative velocity step
         self.b1 = assemble(self.L1)
@@ -281,37 +382,17 @@ class Env2DCylinder():
         self.lift_list.pop(0)
         self.lift_list.append(self.lift_coefficient)
         self.avg_lift = np.mean(self.lift_list)
-
-        # Record full history
+        
         self.full_drag_list.append(self.drag_coefficient)
-
-        if self.save_data == 1 and (self.t * 10) % 10 == 5:
-            self.xdmffile_u.write(self.u_, self.t)
-            self.xdmffile_p.write(self.p_, self.t)
-            self.timeseries_u.store(self.u_.vector(), self.t)
-            self.timeseries_p.store(self.p_.vector(), self.t)
-
-        if self.drag_coefficient > self.Cd_max and self.n > 49:
-            self.Cd_max = self.drag_coefficient
-        if self.lift_coefficient > self.Cl_max and self.n > 49:
-            self.Cl_max = self.lift_coefficient
-
-        if self.n % 50 == 0 and n > 1:
-            i = n / 50
-            self.x.append(self.n)
-            self.y.append(self.drag_coefficient)
-            self.z.append(self.lift_coefficient)
-
-        # if self.n == self.num_steps - 5:
-        #     plt.plot(x, y)
-        #     plt.show()
-
-            # print("Time step:",n,"Cd:",drag_coefficient,"Cl",lift_coefficient)
 
         if plot_p_field == 1 and self.n % plot_fre == 0:
             self.plot_p_field(show_observation_points)
-            # self.w_ = self.compute_vorticity(self.u_)
-            # self.plot_w_field()
+
+        if self.save_data == 1 and self.n % self.save_fre == 0:
+            self.xdmffile_u.write(self.u_, self.n * self.dt)
+            self.xdmffile_p.write(self.p_, self.n * self.dt)
+            self.timeseries_u.store(self.u_.vector(), self.n * self.dt)
+            self.timeseries_p.store(self.p_.vector(), self.n * self.dt)
 
         self.u_n.assign(self.u_)
         self.p_n.assign(self.p_)
@@ -320,60 +401,13 @@ class Env2DCylinder():
         # done=self.n>self.num_steps
         # return s_,r,done
         return probe_results, self.get_reward(self.avg_drag, self.avg_lift), False
-        # return probe_results,self.get_reward(self.drag_coefficient,self.lift_coefficient),done
 
-    def evolve_n(self, n, a=0):
+    def evolve_n(self, n, Q1=0, Q2=0, Q3=0, plot_p_field=0, show_observation_points=0, plot_fre=400):
         for i in range(n):
-            self.evolve(a)
-
-    def memorize_state(self):
-        for n in range(self.mem_episode):
-            self.evolve(0)
-            if n % 200 == 0:
-                fig = plt.figure(figsize=(160, 60), dpi=100)
-                plot(self.p_)
-                for p in self.locations:
-                    plt.scatter(p[0], p[1], color='red', s=300)
-                plt.show()
-
-        self.u_mem = self.u_
-        self.p_mem = self.p_
-        self.drag_mem = self.drag_list
-        self.lift_mem = self.lift_list
-
-        self.mem_state = self.probes_vp()
-
-    def start_with_memory(self):
-        self.t = self.dt * self.mem_episode
-        self.n = self.mem_episode
-        self.Cd_max = 0
-        self.Cl_max = 0
-        self.x = []
-        self.y = []
-        self.z = []
-
-        self.drag_coefficient, self.lift_coefficient = 0, 0
-        self.avg_drag, self.avg_lift = 0, 0
-
-        self.u_ = self.u_mem
-        self.p_ = self.p_mem
-        self.drag_list = self.drag_mem
-        self.lift_list = self.lift_mem
-        self.probes = self.mem_state
-
-    def plot_mesh(self):
-        fig = plt.figure(figsize=(160, 60), dpi=100)
-        plot(self.mesh)
-        plt.show()
-
-    def plot_mesh_save(self, save_path):
-        plt.figure(figsize=(16, 6), dpi=150)
-        plot(self.mesh)
-        plt.title('Mesh')
-        plt.savefig(save_path)
-        plt.close()
+            self.evolve(Q1, Q2, Q3, plot_p_field, show_observation_points, plot_fre)
 
     def plot_p_field(self, show_observation_points=0, save_path=None):
+
         plt.clf()
         self.p_array = self.p_.compute_vertex_values(self.mesh)
         self.p_array = self.p_array.reshape((self.mesh.num_vertices(),))
@@ -390,7 +424,7 @@ class Env2DCylinder():
             x1_coords = np.array(self.jet_locations)[:, 0]
             y1_coords = np.array(self.jet_locations)[:, 1]
             plt.scatter(x1_coords, y1_coords, color='navy', s=5)
-             
+
         plt.xlabel('x')
         plt.ylabel('y')
         plt.title('Pressure Field')
@@ -402,37 +436,26 @@ class Env2DCylinder():
 
     def plot_u_field(self, show_observation_points=0, save_path=None):
         plt.clf()
-        # Compute velocity magnitude
         ux, uy = self.u_.split(deepcopy=True)
         ux_array = ux.compute_vertex_values(self.mesh)
         uy_array = uy.compute_vertex_values(self.mesh)
         u_magnitude = np.sqrt(ux_array**2 + uy_array**2)
-        
         plt.figure(figsize=(10, 4))
         plt.tripcolor(self.mesh.coordinates()[:, 0], self.mesh.coordinates()[:, 1], self.mesh.cells(), u_magnitude,
                       shading="gouraud", cmap='coolwarm')
         plt.colorbar()
-        
-        # Add quiver (arrows) using interpolation to a regular grid
         x_min, x_max = self.mesh.coordinates()[:, 0].min(), self.mesh.coordinates()[:, 0].max()
         y_min, y_max = self.mesh.coordinates()[:, 1].min(), self.mesh.coordinates()[:, 1].max()
-        
-        # Grid density for arrows
-        nx, ny = 50, 10 
+        nx, ny = 40, 20
         grid_x, grid_y = np.meshgrid(np.linspace(x_min, x_max, nx), np.linspace(y_min, y_max, ny))
-        
         points = self.mesh.coordinates()
         grid_ux = griddata(points, ux_array, (grid_x, grid_y), method='linear')
         grid_uy = griddata(points, uy_array, (grid_x, grid_y), method='linear')
-        
-        # Plot arrows (black color)
-        plt.quiver(grid_x, grid_y, grid_ux, grid_uy, color='k', scale=50, width=0.002)
-
+        plt.quiver(grid_x, grid_y, grid_ux, grid_uy, color='k', scale=20, width=0.002)
         if show_observation_points == 1:
             x_coords = np.array(self.locations)[:, 0]
             y_coords = np.array(self.locations)[:, 1]
             plt.scatter(x_coords, y_coords, color='black', s=5)
-             
         plt.xlabel('x')
         plt.ylabel('y')
         plt.title('Velocity Field')
@@ -443,27 +466,25 @@ class Env2DCylinder():
             plt.show()
 
     def plot_w_field(self, show_observation_points=0, save_path=None):
+
         plt.clf()
-        
-        # Need to compute vorticity first
         self.w_ = self.compute_vorticity(self.u_)
-        
         self.w_array = self.w_.compute_vertex_values(self.mesh)
         self.w_array = self.w_array.reshape((self.mesh.num_vertices(),))
-        # Use consistent figsize
         plt.figure(figsize=(10, 4))
-        plt.tripcolor(self.mesh.coordinates()[:,0],self.mesh.coordinates()[:,1],self.mesh.cells(),self.w_array,shading="gouraud",cmap='coolwarm')
+        plt.tripcolor(self.mesh.coordinates()[:, 0], self.mesh.coordinates()[:, 1], self.mesh.cells(), self.w_array,
+                      shading="gouraud", cmap='coolwarm')
         plt.colorbar()
-        
+
         if show_observation_points == 1:
             x_coords = np.array(self.locations)[:, 0]
             y_coords = np.array(self.locations)[:, 1]
             plt.scatter(x_coords, y_coords, color='black', s=5)
-            
+
             x1_coords = np.array(self.jet_locations)[:, 0]
             y1_coords = np.array(self.jet_locations)[:, 1]
             plt.scatter(x1_coords, y1_coords, color='navy', s=5)
-        
+
         plt.xlabel('x')
         plt.ylabel('y')
         plt.title('Vorticity Field')
@@ -474,14 +495,125 @@ class Env2DCylinder():
             plt.show()
 
     def compute_vorticity(self, u):
+        mesh = self.mesh
+
+        class VorticityExpression(UserExpression):
+            def __init__(self, ux_value, uy_value, degree=1, mesh=mesh):
+                self.ux_value = ux_value
+                self.uy_value = uy_value
+                self.YY = FunctionSpace(mesh, 'P', 1)
+                self.ux_trial = Function(self.YY)
+                self.ux_trial.vector().set_local(self.ux_value)
+                self.uy_test = Function(self.YY)
+                self.uy_test.vector().set_local(self.uy_value)
+                super().__init__(degree=degree)
+
+            def eval(self, value, x):
+                value[0] = self.ux_trial.dx(1)(x) - self.uy_test.dx(0)(x)
+
+            def value_shape(self):
+                return ()
+
         ux, uy = u.split(deepcopy=True)
+        VORTICITY = Function(self.W)
         VORTICITY = project(uy.dx(0) - ux.dx(1), self.W)
         return VORTICITY
-        
+
+        # plt.savefig("Airfoil_Re2500/" + str(self.n / self.num_steps).zfill(6) + "Re2500" + ".png")
+        if self.n % 200 == 0:
+            plt.show()
+
+    def update_plot_p_field(self):
+        self.evolve()
+        self.p_array = self.p_.compute_vertex_values(self.mesh)
+        self.p_array = self.p_array.reshape((self.mesh.num_vertices(),))
+        plt.clf()
+
+        plt.tripcolor(self.mesh.coordinates()[:, 0], self.mesh.coordinates()[:, 1], self.mesh.cells(), self.p_array,
+                      shading="gouraud")
+        plt.colorbar()
+        plt.xlabel('x')
+        plt.ylabel('y')
+        plt.title('P_field')
+
+    def update(self, i):
+        if self.n < i:
+            self.evolve()
+        self.update_plot_p_field()
+
+    def generate_mp4(self):
+        self.fig, self.ax = plt.subplots()
+        ani = FuncAnimation(self.fig, self.update, frames=range(17000, self.num_steps), interval=0.5)
+        ani.save('naca0012win.gif', writer='pillow', fps=400)
+        plt.close(self.fig)
+
+    def plot_mesh(self):
+        # Plot the mesh
+        fig = plt.figure(figsize=(160, 60), dpi=150)
+        plot(self.mesh)
+        plt.show()
+
+    def plot_mesh_save(self, save_path):
+        plt.figure(figsize=(16, 6), dpi=150)
+        plot(self.mesh)
+        plt.title('Mesh')
+        plt.savefig(save_path)
+        plt.close()
+
+    def generate_gif(self):
+        self.__init__()
+
+        fig, ax = plt.subplots()
+        fig1, ax1 = plt.subplots()
+
+        def animate_Cd(i):
+            self.update_pressure_field(i)
+            ax1.clear()
+            self.plot_Cd_curve(self.drag_list)
+
+            plt.title(f'Cd of last {len(Cd_list)} numsteps')
+
+        plt.xlabel('Time Step')
+        plt.ylabel('Drag Coefficient')
+
+        def animate(i):
+            self.update_pressure_field(i)
+
+            ax.clear()
+            self.plot_p_field()
+
+            plt.title(f'Time Step: {i}')
+            plt.xlabel('X')
+            plt.ylabel('Y')
+
+            self.plot_Cd_curve(self.drag_list)
+
+        anim = FuncAnimation(fig, animate, frames=self.num_steps, interval=0.2)
+        anim_Cd = FuncAnimation(fig1, animate_Cd, frames=self.num_steps, interval=0.2)
+
+        file_extension = 'gif'
+
+        if file_extension == 'gif':
+            anim.save('naca_gif_Re2500_1.gif', writer='pillow', fps=1200)
+        elif file_extension == 'mp4':
+            anim.save('naca_gif.mp4', writer='ffmpeg', fps=400)
+
+        anim_Cd.save('naca_Cd.gif', writer='pillow', fps=1200)
+
+    def update_pressure_field(self, i):  # used to help generate gif
+        if self.n < i:
+            self.evolve()
+            self.n += 1
+
+    def plot_Cd_curve(self, Cd_list):
+
+        x = range(len(Cd_list))
+        plt.plot(x, Cd_list)
+
     def plot_full_Cd_curve(self, save_path):
         plt.figure(figsize=(10, 6))
         plt.plot(np.arange(len(self.full_drag_list)) * self.dt, self.full_drag_list, label='Cd')
-        avg_cd = np.mean(self.full_drag_list)
+        avg_cd = np.mean(self.full_drag_list) if len(self.full_drag_list) > 0 else 0.0
         plt.axhline(y=avg_cd, color='r', linestyle='--', label=f'Average Cd: {avg_cd:.4f}')
         plt.xlabel('Time (s)')
         plt.ylabel('Drag Coefficient')
@@ -491,117 +623,50 @@ class Env2DCylinder():
         plt.savefig(save_path)
         plt.close()
 
-    def get_reward(self, drag, lift):
-        return -drag  # -0.2*lift##+3.18)?*
-
-    def reset(self):
-        self.__init__()
-        for i in range(1000):
-            self.evolve(0)
-
-        return self.probes_vp()
-
-    def probes_vp(self):
-        self.probes = []
-        for p in self.locations:
-            self.probes.append(self.u_((p[0], p[1]))[0])
-            self.probes.append(self.u_((p[0], p[1]))[1])
-            # self.probes.append(self.p_((p[0],p[1])))
-
-        # self.probes=evals
-        # self.nprobes=len(locations)
-        return self.probes
-
-    def pid(self, kp, ki, kd):
-        sums = 0
-        s = 0
-        s_ = 0
-        ds = 0
-        for i in range(self.num_steps):
-            a = kp * s_ + ki * sums + kd * ds
-            state, _, _ = self.evolve(a)
-            s = state[33]
-            sums += s
-            ds = (s - s_) / self.dt
-            s_ = s
-
-    def pidctl(self):
-        self.pid(100, 0, 0)
-
 def run_visualization_task(total_steps=50000, save_interval=500, video_fps=20):
-    # Define paths
     base_path = os.getcwd()
     result_path = os.path.join(base_path, 'result', 'cylinder')
     pic_path = os.path.join(result_path, 'pic')
     video_path = os.path.join(result_path, 'video')
-    
-    # Create directories
     os.makedirs(pic_path, exist_ok=True)
     os.makedirs(video_path, exist_ok=True)
-    
-    # Initialize Environment
     print("Initializing Environment...")
-    env = Env2DCylinder(save_data=0)
-    
-    # Save Mesh
+    env = Env2DAirfoil(save_data=0)
     print("Saving Mesh...")
     env.plot_mesh_save(os.path.join(pic_path, 'cfd_mesh.png'))
-    
     print(f"Starting simulation for {total_steps} steps...")
-    
     for step in range(1, total_steps + 1):
         env.evolve(0)
-        
         if step % save_interval == 0:
             time_s = step * env.dt
             print(f"Step {step}/{total_steps} (Time: {time_s:.2f}s) - Saving frames...")
-            
-            # Save Pressure Field
             env.plot_p_field(save_path=os.path.join(pic_path, f'p_field_{time_s:.2f}s.png'))
-            
-            # Save Velocity Field
             env.plot_u_field(save_path=os.path.join(pic_path, f'u_field_{time_s:.2f}s.png'))
-            
-            # Save Vorticity Field
             env.plot_w_field(save_path=os.path.join(pic_path, f'w_field_{time_s:.2f}s.png'))
-            
-    # Save Cd Curve
     print("Saving Cd Curve...")
     env.plot_full_Cd_curve(os.path.join(pic_path, 'Cd_curve_5s.png'))
-    
-    # Generate Videos
     print("Generating Videos...")
-    
-    def make_video(image_prefix, output_name, fps=20): 
+    def make_video(image_prefix, output_name, fps=20):
         images = [img for img in os.listdir(pic_path) if img.startswith(image_prefix) and img.endswith(".png")]
-        # Sort by time stamp
-        try:
-            images.sort(key=lambda x: float(x.split('_')[-1].replace('s.png', '')))
-        except ValueError:
-            pass 
-        
+        images.sort(key=lambda x: float(x.split('_')[-1].replace('s.png', '')))
         if not images:
             print(f"No images found for {image_prefix}")
             return
-
         frame = cv2.imread(os.path.join(pic_path, images[0]))
         height, width, layers = frame.shape
-        
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         video = cv2.VideoWriter(os.path.join(video_path, output_name), fourcc, fps, (width, height))
-        
         for image in images:
             video.write(cv2.imread(os.path.join(pic_path, image)))
-            
         cv2.destroyAllWindows()
         video.release()
         print(f"Saved {output_name}")
-
     make_video('p_field', 'pressure_field_5s.mp4', fps=video_fps)
     make_video('u_field', 'velocity_field_5s.mp4', fps=video_fps)
     make_video('w_field', 'vorticity_field_5s.mp4', fps=video_fps)
-    
     print("All tasks completed successfully!")
 
-if __name__ == "__main__":
-    run_visualization_task()
+
+if __name__ == '__main__':
+    run_visualization_task(total_steps=50000, save_interval=500, video_fps=20)
+
