@@ -617,10 +617,10 @@ class Env2DAirfoil:
         plt.savefig(save_path)
         plt.close()
 
-def run_visualization_task(total_steps=50000, save_interval=500):
+def run_visualization_task(total_steps=50000, save_interval=500, video_fps=20):
     # Define paths
     base_path = os.getcwd()
-    result_path = os.path.join(base_path, 'result')
+    result_path = os.path.join(base_path, 'result', 'airfoil')
     pic_path = os.path.join(result_path, 'pic')
     video_path = os.path.join(result_path, 'video')
     
@@ -687,9 +687,9 @@ def run_visualization_task(total_steps=50000, save_interval=500):
         video.release()
         print(f"Saved {output_name}")
 
-    make_video('p_field', 'pressure_field_5s.mp4', fps=20)
-    make_video('u_field', 'velocity_field_5s.mp4', fps=20)
-    make_video('w_field', 'vorticity_field_5s.mp4', fps=20)
+    make_video('p_field', 'pressure_field_5s.mp4', fps=video_fps)
+    make_video('u_field', 'velocity_field_5s.mp4', fps=video_fps)
+    make_video('w_field', 'vorticity_field_5s.mp4', fps=video_fps)
     
     print("All tasks completed successfully!")
 
