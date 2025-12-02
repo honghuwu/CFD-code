@@ -208,13 +208,9 @@ class Env2DCylinder():
     def update_jetBCs(self, new_Qjet):
         self.jet1_f.Qjet = new_Qjet
         self.jet2_f.Qjet = new_Qjet
-        self.bcu_jet_top = DirichletBC(self.V, self.jet1_f, self.jet_top)
-        self.bcu_jet_bottom = DirichletBC(self.V, self.jet2_f, self.jet_bottom)
-        self.bcu = [self.bcu_inflow, self.bcu_walls, self.bcu_cylinder, self.bcu_jet_top, self.bcu_jet_bottom]
+        # BC expressions are updated automatically, no need to recreate DirichletBC objects
+        # or re-apply them to the matrix A1/A2 if the boundary geometry hasn't changed.
 
-        # Apply bcs to matrices
-        [bc.apply(self.A1) for bc in self.bcu]
-        [bc.apply(self.A2) for bc in self.bcp]
 
     def compute_drag_lift_coefficients(self, u, p):
         # Define normal vector along the cylinder surface
