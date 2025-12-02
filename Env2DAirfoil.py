@@ -9,10 +9,10 @@ import os
 import cv2
 
 class Env2DAirfoil:
-    def naca0012(self, x, chord=self.D):
+    def naca0012(self, x, chord=1.0):
         return 0.6 * (-0.1015 * x ** 4 + 0.2843 * x ** 3 - 0.3576 * x ** 2 - 0.1221 * x + 0.2969 * np.sqrt(x))
 
-    def naca0015(self, x, chord=sefl.D):
+    def naca0015(self, x, chord=1.0):
         return 0.6 * (-0.0644 * x ** 4 + 0.2726 * x ** 3 - 0.3576 * x ** 2 - 0.1270 * x + 0.2983 * np.sqrt(x))
 
     def __init__(self, Re=2500, attack_angle=pi / 7.2, probes_mode=0, probe_locations_mode=0, save_data=1,
